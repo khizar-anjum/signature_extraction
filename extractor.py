@@ -9,6 +9,8 @@ import os
 from keras.models import load_model
 from pdf2image import convert_from_path 
 from pytesseract import image_to_string
+import cv2
+import numpy as np
 
 class extractor:
     def __init__(self,neural_net):
@@ -30,6 +32,26 @@ class extractor:
         if(self.__exists(filename)):
             self.current_file = filename
             self.images = convert_from_path(filename, 200)
+            self.__preprocess()
+            
+    def __preprocess(self):
+        for i,image in enumerate(self.images):
+            img = np.array(image,dtype='uint8')
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) 
+            img = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
+            gray = cv2.bitwise_not(img)
+            # Rotation code
+            coords = np.column_stack(np.where(gray > 0))
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+            	angle = -(90 + angle)
+            else:
+            	angle = -angle
+            
+            (h, w) = gray.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            self.images[i] = cv2.warpAffine(gray, M, (w, h),flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
             
     def get_current_file(self):
         return self.current_file
@@ -55,5 +77,9 @@ class extractor:
         else:
             s = ''
             for image in self.images:
-                s = s + image_to_string(image)
+                s = s + image_to_string(image) + '\n'
             return s
+        
+    def extract(self):
+        #get all the signatures in the document into one stuff
+        pass
