@@ -53,11 +53,16 @@ good_sig = masked[y:y+h,x:x+w]
 plt.imshow(good_sig,cmap='gray')
 
 #%%
-exp = good_sig.copy()
-n = 17
+#kernel = np.ones((3,3),np.uint8)
+exp = rotated.copy() #cv2.dilate(rotated,kernel) #
+n = 13
 linek = np.zeros((n,n),dtype=np.uint8)
 linek[int((n-1)/2),...]=1
-x=cv2.morphologyEx(good_sig, cv2.MORPH_OPEN, linek ,iterations=1)
+x=cv2.morphologyEx(rotated, cv2.MORPH_OPEN, linek ,iterations=5)
+exp-=x
+linek = np.zeros((n,n),dtype=np.uint8)
+linek[...,int((n-1)/2)]=1
+x=cv2.morphologyEx(exp, cv2.MORPH_OPEN, linek ,iterations=5)
 exp-=x
 plt.imshow(exp,cmap='gray')
 

@@ -6,18 +6,15 @@ Created on Tue Jul 23 21:51:00 2019
 """
 
 import os
-from keras.models import load_model
 from pdf2image import convert_from_path 
 from pytesseract import image_to_string
 import cv2
 import numpy as np
 
 class extractor:
-    def __init__(self,neural_net):
-        #used to load up the basic neural network and intialize class variables
-        #self.load_neural_model(neural_net)
+    def __init__(self):
         # name of the current file under operation
-        self.__current_file = ''
+        self.current_file = ''
         # list of the images a pdf file is converted to after preperation
         self.images = []
         self.signatures = []
@@ -29,11 +26,14 @@ class extractor:
         else:
             raise NameError('\''+filename+'\' does not exist in path.')
         
-    def __match(self,imgs):
+    def __match(self,img1,img2):
+        orb = cv2.ORB_create()
         MIN_MATCH_COUNT = 10
-        #using the brisk descriptor to find out the matches
-        all_matches = []
-        brisk = cv2.BRISK_create()
+        RATIO_FOR_TEST = 0.7
+        # find the keypoints and descriptors with ORB
+        kp1, des1 = orb.detectAndCompute(img1,None)
+        kp2, des2 = orb.detectAndCompute(img2,None)
+        
         FLANN_INDEX_LSH = 6
         index_params= dict(algorithm = FLANN_INDEX_LSH,
                 table_number = 6, # 12
@@ -41,78 +41,126 @@ class extractor:
                 multi_probe_level = 1) #2
         search_params = dict(checks=50)   # or pass empty dictionary
         
-        for org in self.signatures:    
-            matched_sigs = []
-            for img in imgs:
-                # find the keypoints and descriptors with ORB
-                _, des1 = brisk.detectAndCompute(img,None)
-                _, des2 = brisk.detectAndCompute(org.sig,None)                
-                #find matches using flann                
-                flann = cv2.FlannBasedMatcher(index_params,search_params)
-                matches = flann.knnMatch(des1,des2,k=2)
-                
-                # store all the good matches as per Lowe's ratio test.
-                good = []
-                matches = [x for x in matches if len(x) == 2]
-                for m,n in matches:
-                    if m.distance < 0.7*n.distance:
-                        good.append(m)
-            
-                if len(good)>MIN_MATCH_COUNT:
-                    matched_sigs.append(img)
-            all_matches.append([org,matched_sigs])
-        return all_matches
+        flann = cv2.FlannBasedMatcher(index_params,search_params)
+        #bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        try:
+            matches = flann.knnMatch(des1,des2,k=2)
+        except:
+            return False
+        matches = [x for x in matches if len(x) == 2]
+        # store all the good matches as per Lowe's ratio test.
+        good = []
+        for m,n in matches:
+            if m.distance < RATIO_FOR_TEST*n.distance:
+                good.append(m)
+        
+        if len(good)>MIN_MATCH_COUNT:
+            return True
+        else: return False
             
     def __preprocess(self):
         for i,image in enumerate(self.images):
-            img = np.array(image,dtype='uint8')
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) 
-            img = cv2.adaptiveThreshold(img, 255, \
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
-            gray = cv2.bitwise_not(img)
+            image = np.array(image,dtype='uint8')
+            img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV\
+                                + cv2.THRESH_OTSU)[1]
             # Rotation code
-            coords = np.column_stack(np.where(gray > 0))
+            coords = np.column_stack(np.where(img > 0))
             angle = cv2.minAreaRect(coords)[-1]
             if angle < -45:
             	angle = -(90 + angle)
             else:
             	angle = -angle
             
-            (h, w) = gray.shape[:2]
+            (h, w) = img.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            self.images[i] = cv2.warpAffine(gray, M, (w, h)\
+            self.images[i] = cv2.warpAffine(image, M, (w, h)\
                 ,flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            
+    def __get_overlap_area(self,box_a, box_b):
+        x1_a, y1_a, width_a, height_a = box_a
+        x1_b, y1_b, width_b, height_b = box_b
+    
+        x2_a = x1_a + width_a
+        y2_a = y1_a + height_a
+        x2_b = x1_b + width_b
+        y2_b = y1_b + height_b
+    
+        #get the width and height of overlap rectangle
+        overlap_width =  min(x2_a, x2_b) - max(x1_a, x1_b) 
+        overlap_height = min(y2_a, y2_b) - max(y1_a, y1_b) 
+    
+        #If the width or height of overlap rectangle is negative, it implies that two rectangles does not overlap.
+        if overlap_width > 0 and overlap_height > 0:
+            return overlap_width * overlap_height
+        else:
+            return 0
+      
+    
+    def __get_IOU(self,box_a, box_b):
+        overlap_area = self.__get_overlap_area(box_a, box_b)
+        
+        #Union = A + B - I(A&B)
+        area_a = box_a[2] * box_a[3]
+        area_b = box_b[2] * box_b[3]
+        union_area = area_a + area_b - overlap_area
+        
+        
+        if overlap_area > 0 :
+            return overlap_area / union_area
+        else:
+            return 0
+        
+    def __get_selective_matches(self,img):
+        #parameters
+        MAX_OVERLAP = 0.80
+        NEW_HEIGHT = 200
+        # resize image
+        frac = img.shape[0]/NEW_HEIGHT #the resize factor
+        newWidth = int(img.shape[1]/frac)
+        img = cv2.resize(img, (newWidth, NEW_HEIGHT))
+         
+        # create Selective Search Segmentation Object using default parameters
+        ss = cv2.ximgproc.segmentation.createSelectiveSearchSegmentation()
+         
+        # set input image on which we will run segmentation
+        ss.setBaseImage(img)
+        ss.switchToSelectiveSearchQuality()
+         
+        # run selective search segmentation on input image
+        rects = ss.process()
+        
+        #filter upon the basis of maximum overlap allowed
+        areas = []            
+        for i, rect in enumerate(rects[:-1,...]):
+            for j in rects[i+1:,...]:
+                temp = self.__get_IOU(rect,j)
+                if(temp > MAX_OVERLAP): 
+                    areas.append(i)
+                    break
+        rects = np.delete(rects,obj=areas,axis=0)
+        rects = rects*frac #resizing the reigons again
+        rects = rects.astype('int32')
+        return rects
             
     def prepare(self,filename):
         #prepares the file (pdf preferably) for extraction i.e. forms vars
         if(self.__exists(filename)):
-            self.__current_file = filename
+            self.current_file = filename
             self.images = convert_from_path(filename, 200)
             self.__preprocess()
-            
-    def get_current_file(self):
-        return self.__current_file
     
     def clear(self):
-        self.__current_file = ''
+        self.current_file = ''
         self.images = []
         self.model = None
         self.signatures = []
         self.payload = []
-        
-        
-    def load_neural_model(self, neural_net):
-        #loads a neural net
-        if(self.__exists(neural_net)):
-            try:
-                self.model = load_model(neural_net)
-            except Exception as e:
-                print(e)
                 
     def get_OCR(self):
         #gets OCR with the help of pytessseract
-        if(self.__current_file == ''):
+        if(self.current_file == ''):
             raise ValueError('Current file cannot be empty for this operation.\
                              Kindly prepare the file first')
         else:
@@ -123,45 +171,45 @@ class extractor:
         
     def load_signature(self, image_path, info):
         if(self.__exists(image_path)):
-            image = cv2.bitwise_not(cv2.threshold(cv2.imread(image_path,0)\
-                ,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1])
+            image = cv2.imread(image_path)
             self.signatures.append(signature(image,info))
         
     def extract(self):
         #get all the signatures in the document into one stuff
-        for img in self.images:
-            contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
-            prms = []
-            for i,c in enumerate(contours):
-                prms.append(cv2.arcLength(c,True))
-            #getting the top 30 contours with high parameters
-            indices = np.argsort(np.array(prms))[-30:]
-            good_contours = [contours[i] for i in indices]
-            good_imgs = []
-            #this loop serves to extract potential sigs into good_imgs
-            for c in good_contours:
-                #making a convex hull around the signature. 
-                black = np.zeros_like(img)
-                hull = cv2.convexHull(c)
-                cv2.drawContours(black, [hull], -1, (255, 255, 255), -1)
-                masked = cv2.bitwise_and(img, img, mask = black)
-                x, y, w, h = cv2.boundingRect(c)
-                good_sig = masked[y:y+h,x:x+w]
-                
-                #removing horizontal straight lines 
-                n = 17 #filter width
-                linek = np.zeros((n,n),dtype=np.uint8)
-                linek[int((n-1)/2),...]=1
-                x=cv2.morphologyEx(good_sig, cv2.MORPH_OPEN, linek ,iterations=1)
-                good_sig-=x
-                good_imgs.append(good_sig)
-                
-        #matching signatures and the image
-        #i want something that could be json encoded
-        #this would be something like 
-        #[[sig1, [match1, match2, ...]],[sig2, [match1, ...]], ...]
-        self.payload = self.__match(good_imgs)
-        return self.payload
+        MIN_COMMON_AREA = 0.75
+        NUM_TOP_MATCHES = 2
+        for sig in self.signatures:
+            matches = []
+            areas = []
+            for img in self.images:                
+                det_rects = []
+                #get the rects with high probability of having signatures
+                rects = self.__get_selective_matches(img)
+                #find the matching boxes
+                for rect in rects:
+                    x, y, w, h = rect
+                    if(self.__match(sig.sig,img[y:y+h,x:x+w])): 
+                        matches.append(img[y:y+h,x:x+w])
+                        det_rects.append(rect)
+                #find the overlapping areas for each box with another
+                for i, rect in enumerate(det_rects[:-1]):
+                    temp = []
+                    for j in det_rects[i+1:]:
+                        temp.append(self.__get_IOU(rect,j))
+                    areas.append(np.sum(np.array(temp)))
+            #among all the images, focus on the ones which have highest area overlap    
+            print(matches[0].shape)
+            print(areas)
+            matches = [matches[i] for i in np.argsort(areas)]
+            print(matches[0].shape)
+            areas = np.sort(areas)
+            matches = [matches[i] for i in np.nonzero(areas > MIN_COMMON_AREA)[0]]
+            matches = matches[-NUM_TOP_MATCHES:]
+            
+            #this would be something like 
+            #[[sig1, [match1, match2, ...]],[sig2, [match1, ...]], ...]
+            self.payload.append([sig,matches])
+        return det_rects, areas, self.payload
     
 class signature:
     def __init__(self, image, info):

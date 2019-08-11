@@ -7,7 +7,7 @@ Created on Sat Aug  3 13:55:01 2019
 from extractor import extractor
 
 h = extractor('what is up')
-h.prepare('pdfs/2_Scan_18022019_192700.pdf')
+h.prepare('pdfs/6_Scan_18022019_192801.pdf')
 
 #%% loading some sigs
 h.load_signature('sigs\\A_2.png',{'name':'jani no scene'})
@@ -20,3 +20,6 @@ what = h.extract()
 
 #next direction is to definitely use svm and autoencoder techniques to better 
 #the signature matching
+
+
+#%%
