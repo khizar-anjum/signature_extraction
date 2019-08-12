@@ -8,6 +8,8 @@ Created on Tue Jul 23 21:51:00 2019
 import os
 from pdf2image import convert_from_path 
 from pytesseract import image_to_string
+from skimage import measure, morphology
+from skimage.measure import regionprops
 import cv2
 import numpy as np
 
@@ -75,8 +77,9 @@ class extractor:
             (h, w) = img.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            self.images[i] = cv2.warpAffine(image, M, (w, h)\
+            img = cv2.warpAffine(image, M, (w, h)\
                 ,flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            self.images[i] = img
             
     def __get_overlap_area(self,box_a, box_b):
         x1_a, y1_a, width_a, height_a = box_a
@@ -114,7 +117,7 @@ class extractor:
         
     def __get_selective_matches(self,img):
         #parameters
-        MAX_OVERLAP = 0.80
+        MAX_OVERLAP = 0.70
         NEW_HEIGHT = 200
         # resize image
         frac = img.shape[0]/NEW_HEIGHT #the resize factor
@@ -144,6 +147,48 @@ class extractor:
         rects = rects.astype('int32')
         return rects
             
+    def __get_connected_components(self,img):
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        #block to increase contrast
+        maxIntensity = 255.0 # depends on dtype of image data               
+        # Parameters for manipulating image data
+        phi = 1
+        theta = 2
+        newImage1 = (maxIntensity/phi)*(img/(maxIntensity/theta))**2
+        newImage1 = np.array(newImage1,dtype='uint8')
+        
+        img = cv2.threshold(newImage1, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]  # ensure binary
+        # connected component analysis by scikit-learn framework
+        blobs = img > img.mean()
+        blobs_labels = measure.label(blobs, background=1)
+        
+        the_biggest_component = 0
+        total_area = 0
+        counter = 0
+        average = 0.0
+        for region in regionprops(blobs_labels):
+            if (region.area > 10):
+                total_area = total_area + region.area
+                counter = counter + 1
+            # take regions with large enough areas
+            if (region.area >= 250):
+                if (region.area > the_biggest_component):
+                    the_biggest_component = region.area
+        
+        average = (total_area/counter)
+        a4_constant = ((average/84.0)*150.0)
+        
+        b = blobs_labels.copy()
+        component_sizes = np.bincount(b.ravel())
+        too_small = np.logical_or((component_sizes < a4_constant),(component_sizes > 10000))
+        too_small_mask = too_small[b]
+        b[too_small_mask] = 0
+        b = b.astype('uint8')
+        b = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        #kernel = np.ones((3,3), np.uint8)
+        #b = cv2.erode(b,kernel)
+        return np.stack((b,b,b),axis=2)
+        
     def prepare(self,filename):
         #prepares the file (pdf preferably) for extraction i.e. forms vars
         if(self.__exists(filename)):
@@ -154,9 +199,7 @@ class extractor:
     def clear(self):
         self.current_file = ''
         self.images = []
-        self.model = None
         self.signatures = []
-        self.payload = []
                 
     def get_OCR(self):
         #gets OCR with the help of pytessseract
@@ -176,15 +219,19 @@ class extractor:
         
     def extract(self):
         #get all the signatures in the document into one stuff
-        MIN_COMMON_AREA = 0.75
+        #warning if signatures or the images are empty
+        MIN_COMMON_AREA = 0.2
         NUM_TOP_MATCHES = 2
-        for sig in self.signatures:
-            matches = []
-            areas = []
-            for img in self.images:                
+        self.payload = []
+        sig_matches = [ [] for i in range(len(self.signatures)) ]
+        sig_areas = sig_matches.copy()
+        for img in self.images:
+            #get the rects with high probability of having signatures
+            rects = self.__get_selective_matches(self.__get_connected_components(img))
+            for k, sig in enumerate(self.signatures):
+                matches = []
+                areas = []
                 det_rects = []
-                #get the rects with high probability of having signatures
-                rects = self.__get_selective_matches(img)
                 #find the matching boxes
                 for rect in rects:
                     x, y, w, h = rect
@@ -192,24 +239,31 @@ class extractor:
                         matches.append(img[y:y+h,x:x+w])
                         det_rects.append(rect)
                 #find the overlapping areas for each box with another
-                for i, rect in enumerate(det_rects[:-1]):
-                    temp = []
-                    for j in det_rects[i+1:]:
-                        temp.append(self.__get_IOU(rect,j))
-                    areas.append(np.sum(np.array(temp)))
-            #among all the images, focus on the ones which have highest area overlap    
-            print(matches[0].shape)
-            print(areas)
-            matches = [matches[i] for i in np.argsort(areas)]
-            print(matches[0].shape)
-            areas = np.sort(areas)
-            matches = [matches[i] for i in np.nonzero(areas > MIN_COMMON_AREA)[0]]
-            matches = matches[-NUM_TOP_MATCHES:]
-            
+                #this box weeds out false positives
+                if(det_rects == []):
+                    areas = np.array(areas)
+                elif(len(det_rects) > 1):
+                    for i, rect in enumerate(det_rects[:-1]):
+                        temp = []
+                        for j in det_rects[i+1:]:
+                            temp.append(self.__get_IOU(rect,j))
+                        areas.append(np.sum(np.array(temp)))
+                    #finding the positive boxes with greatest overlap    
+                    matches = [matches[i] for i in np.argsort(areas)]
+                    areas = np.sort(areas)
+                    matches = [matches[i] for i in np.nonzero(areas > MIN_COMMON_AREA)[0]]
+                    areas  = areas[np.nonzero(areas > MIN_COMMON_AREA)]
+                else:
+                    areas = np.array([MIN_COMMON_AREA])
+                sig_matches[k] = sig_matches[k] + matches#[-NUM_TOP_MATCHES:]
+                sig_areas[k] = sig_areas[k] + areas.tolist()#[-NUM_TOP_MATCHES:].tolist()
+        
+        for k, sig in enumerate(self.signatures):
+            sig_matches[k] = [sig_matches[k][i] for i in np.argsort(sig_areas[k])]
             #this would be something like 
             #[[sig1, [match1, match2, ...]],[sig2, [match1, ...]], ...]
-            self.payload.append([sig,matches])
-        return det_rects, areas, self.payload
+            self.payload.append([sig,sig_matches[k]])#[-NUM_TOP_MATCHES:]])
+        return self.payload
     
 class signature:
     def __init__(self, image, info):
