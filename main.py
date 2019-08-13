@@ -14,9 +14,9 @@ ext = extractor()
 
 #%% loading some sigs
 ext.load_signature('sigs\\A_2.png',{'name':'1st'})
-ext.load_signature('sigs\\B_3.png',{'name':'second'})
-ext.load_signature('sigs\\genuine-10.png',{'name':'third'})
-ext.load_signature('sigs\\genuine-12.png',{'name':'fourth'})
+#ext.load_signature('sigs\\B_3.png',{'name':'second'})
+#ext.load_signature('sigs\\genuine-10.png',{'name':'third'})
+#ext.load_signature('sigs\\genuine-12.png',{'name':'fourth'})
 #%%
 ext.prepare('pdfs\\2_Scan_18022019_192700.pdf')
 payload = ext.extract()

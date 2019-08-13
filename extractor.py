@@ -6,14 +6,16 @@ Created on Tue Jul 23 21:51:00 2019
 """
 
 import os
+import numpy as np
 from pdf2image import convert_from_path 
 from pytesseract import image_to_string
-from skimage import measure
-from skimage.measure import regionprops
 import imagehash
 from PIL import Image
 import cv2
-import numpy as np
+import torch
+from Model import SiameseConvNet, distance_metric
+from Preprocessing import convert_to_image_tensor, invert_image
+import matplotlib.pyplot as plt
 
 class extractor:
     def __init__(self):
@@ -24,6 +26,13 @@ class extractor:
         self.signatures = []
         self.payload = []
         self.sig_hashes = []
+        self.__load_model()
+        
+    def __load_model(self):
+        device = torch.device('cpu')
+        self.model = SiameseConvNet().eval()
+        if(self.__exists('Models/model_epoch_2')):
+            self.model.load_state_dict(torch.load('Models/model_epoch_2', map_location=device))
         
     def __exists(self,filename):
         if(os.path.exists(filename)):
@@ -31,59 +40,21 @@ class extractor:
         else:
             raise NameError('\''+filename+'\' does not exist in path.')
         
-    def __match(self,img1,img2):
-        orb = cv2.ORB_create()
-        MIN_MATCH_COUNT = 10
-        RATIO_FOR_TEST = 0.7
-        # find the keypoints and descriptors with ORB
-        kp1, des1 = orb.detectAndCompute(img1,None)
-        kp2, des2 = orb.detectAndCompute(img2,None)
+    def __match(self,img1,img2):        
+        MAX_DIST = 0.20
         
-        FLANN_INDEX_LSH = 6
-        index_params= dict(algorithm = FLANN_INDEX_LSH,
-                table_number = 6, # 12
-                key_size = 12,     # 20
-                multi_probe_level = 1) #2
-        search_params = dict(checks=50)   # or pass empty dictionary
-        
-        flann = cv2.FlannBasedMatcher(index_params,search_params)
-        #bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        try:
-            matches = flann.knnMatch(des1,des2,k=2)
-        except:
-            return False
-        matches = [x for x in matches if len(x) == 2]
-        # store all the good matches as per Lowe's ratio test.
-        good = []
-        for m,n in matches:
-            if m.distance < RATIO_FOR_TEST*n.distance:
-                good.append(m)
-        
-        if len(good)>MIN_MATCH_COUNT:
+        X = convert_to_image_tensor(invert_image(Image.fromarray(img2))).view(1, 1, 220, 155)
+        A = convert_to_image_tensor(invert_image(Image.fromarray(img1))).view(1, 1, 220, 155)
+        f_A, f_X = self.model.forward(A, X)
+        dist = distance_metric(f_A, f_X).detach().numpy()
+        print(dist)
+        if dist <= MAX_DIST:
             return True
         else: return False
             
     def __preprocess(self):
         for i,image in enumerate(self.images):
             image = np.array(image,dtype='uint8')
-            """
-            img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV\
-                                + cv2.THRESH_OTSU)[1]
-            # Rotation code
-            coords = np.column_stack(np.where(img > 0))
-            angle = cv2.minAreaRect(coords)[-1]
-            if angle < -45:
-            	angle = -(90 + angle)
-            else:
-            	angle = -angle
-            
-            (h, w) = img.shape[:2]
-            center = (w // 2, h // 2)
-            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            img = cv2.warpAffine(image, M, (w, h)\
-                ,flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-            """
             self.images[i] = self.__get_connected_components(image)
             
     def __get_overlap_area(self,box_a, box_b):
@@ -212,7 +183,7 @@ class extractor:
     def extract(self):
         #get all the signatures in the document into one stuff
         #warning if signatures or the images are empty
-        MIN_COMMON_AREA = 0.1
+        MIN_COMMON_AREA = 0
         NUM_TOP_MATCHES = 4
         self.payload = []
         sig_matches = [ [] for i in range(len(self.signatures)) ]
@@ -229,8 +200,10 @@ class extractor:
                 hash_diffs = []
                 det_rects = []
                 #find the matching boxes
+                print(len(rects))
                 for i, rect in enumerate(rects):
                     x, y, w, h = rect
+                    plt.imsave('output'+str(i) + '.png',img[y:y+h,x:x+w])
                     if(self.__match(sig.sig,img[y:y+h,x:x+w])): 
                         matches.append(img[y:y+h,x:x+w])
                         det_rects.append(rect)
