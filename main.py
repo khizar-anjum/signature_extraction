@@ -10,7 +10,7 @@ from glob import glob
 import cv2
 
 ext = extractor()
-ext.prepare('pdfs\\PoA_B14_Filipe Silva e Thore Kristiansen.pdf')
+#ext.prepare('pdfs\\PoA_B14_Filipe Silva e Thore Kristiansen.pdf')
 
 #%% loading some sigs
 ext.load_signature('sigs\\A_2.png',{'name':'1st'})
@@ -18,7 +18,7 @@ ext.load_signature('sigs\\B_3.png',{'name':'second'})
 ext.load_signature('sigs\\genuine-10.png',{'name':'third'})
 ext.load_signature('sigs\\genuine-12.png',{'name':'fourth'})
 #%%
-ext.prepare('pdfs\\5_Scan_18022019_192748.pdf')
+ext.prepare('pdfs\\2_Scan_18022019_192700.pdf')
 payload = ext.extract()
 #%%
 """

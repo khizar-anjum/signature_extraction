@@ -8,8 +8,10 @@ Created on Tue Jul 23 21:51:00 2019
 import os
 from pdf2image import convert_from_path 
 from pytesseract import image_to_string
-from skimage import measure, morphology
+from skimage import measure
 from skimage.measure import regionprops
+import imagehash
+from PIL import Image
 import cv2
 import numpy as np
 
@@ -21,6 +23,7 @@ class extractor:
         self.images = []
         self.signatures = []
         self.payload = []
+        self.sig_hashes = []
         
     def __exists(self,filename):
         if(os.path.exists(filename)):
@@ -63,6 +66,7 @@ class extractor:
     def __preprocess(self):
         for i,image in enumerate(self.images):
             image = np.array(image,dtype='uint8')
+            """
             img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV\
                                 + cv2.THRESH_OTSU)[1]
@@ -79,7 +83,8 @@ class extractor:
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             img = cv2.warpAffine(image, M, (w, h)\
                 ,flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-            self.images[i] = img
+            """
+            self.images[i] = self.__get_connected_components(image)
             
     def __get_overlap_area(self,box_a, box_b):
         x1_a, y1_a, width_a, height_a = box_a
@@ -117,7 +122,7 @@ class extractor:
         
     def __get_selective_matches(self,img):
         #parameters
-        MAX_OVERLAP = 0.70
+        MAX_OVERLAP = 0.80
         NEW_HEIGHT = 200
         # resize image
         frac = img.shape[0]/NEW_HEIGHT #the resize factor
@@ -133,61 +138,47 @@ class extractor:
          
         # run selective search segmentation on input image
         rects = ss.process()
-        
+        print(len(rects))
         #filter upon the basis of maximum overlap allowed
         areas = []            
         for i, rect in enumerate(rects[:-1,...]):
             for j in rects[i+1:,...]:
                 temp = self.__get_IOU(rect,j)
-                if(temp > MAX_OVERLAP): 
+                _, _, w, h = rect
+                if(temp > MAX_OVERLAP or h/w > 3): 
                     areas.append(i)
                     break
         rects = np.delete(rects,obj=areas,axis=0)
         rects = rects*frac #resizing the reigons again
         rects = rects.astype('int32')
         return rects
+    
+    def __process_line(self,thresh,output):	
+        # assign a rectangle kernel size	1 vertical and the other will be horizontal
+        kernel = np.ones((1,5), np.uint8)
+        kernel2 = np.ones((2,4), np.uint8)	
+        # use closing morph operation but fewer iterations than the letter then erode to narrow the image	
+        temp_img = cv2.morphologyEx(thresh,cv2.MORPH_CLOSE,kernel2,iterations=2)
+        #temp_img = cv2.erode(thresh,kernel,iterations=2)	
+        line_img = cv2.dilate(temp_img,kernel,iterations=5)
+
+        (contours, _) = cv2.findContours(line_img.copy(), cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        aspects = []
+        areas = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspects.append(w/h)
+            areas.append(w*h)
+            if(w/h > 8 or (10000 < w*h and w*h < 20000) or w*h >200000):
+                output[y:y+h,x:x+w][:] = 255
+    		
+        return output
             
     def __get_connected_components(self,img):
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        #block to increase contrast
-        maxIntensity = 255.0 # depends on dtype of image data               
-        # Parameters for manipulating image data
-        phi = 1
-        theta = 2
-        newImage1 = (maxIntensity/phi)*(img/(maxIntensity/theta))**2
-        newImage1 = np.array(newImage1,dtype='uint8')
-        
-        img = cv2.threshold(newImage1, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]  # ensure binary
-        # connected component analysis by scikit-learn framework
-        blobs = img > img.mean()
-        blobs_labels = measure.label(blobs, background=1)
-        
-        the_biggest_component = 0
-        total_area = 0
-        counter = 0
-        average = 0.0
-        for region in regionprops(blobs_labels):
-            if (region.area > 10):
-                total_area = total_area + region.area
-                counter = counter + 1
-            # take regions with large enough areas
-            if (region.area >= 250):
-                if (region.area > the_biggest_component):
-                    the_biggest_component = region.area
-        
-        average = (total_area/counter)
-        a4_constant = ((average/84.0)*150.0)
-        
-        b = blobs_labels.copy()
-        component_sizes = np.bincount(b.ravel())
-        too_small = np.logical_or((component_sizes < a4_constant),(component_sizes > 10000))
-        too_small_mask = too_small[b]
-        b[too_small_mask] = 0
-        b = b.astype('uint8')
-        b = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        #kernel = np.ones((3,3), np.uint8)
-        #b = cv2.erode(b,kernel)
-        return np.stack((b,b,b),axis=2)
+        img_bw = img.copy()
+        img_bw = cv2.cvtColor(img_bw, cv2.COLOR_BGR2GRAY)
+        _,img_bw = cv2.threshold(img_bw,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+        return self.__process_line(img_bw, img)
         
     def prepare(self,filename):
         #prepares the file (pdf preferably) for extraction i.e. forms vars
@@ -216,24 +207,29 @@ class extractor:
         if(self.__exists(image_path)):
             image = cv2.imread(image_path)
             self.signatures.append(signature(image,info))
+            self.sig_hashes.append(imagehash.phash(Image.fromarray(image)))
         
     def extract(self):
         #get all the signatures in the document into one stuff
         #warning if signatures or the images are empty
-        MIN_COMMON_AREA = 0.2
-        NUM_TOP_MATCHES = 2
+        MIN_COMMON_AREA = 0.1
+        NUM_TOP_MATCHES = 4
         self.payload = []
         sig_matches = [ [] for i in range(len(self.signatures)) ]
+        sig_hash_matches = sig_matches.copy()
         sig_areas = sig_matches.copy()
+        sig_diffs = sig_matches.copy()
         for img in self.images:
             #get the rects with high probability of having signatures
-            rects = self.__get_selective_matches(self.__get_connected_components(img))
+            rects = self.__get_selective_matches(img)
             for k, sig in enumerate(self.signatures):
                 matches = []
+                hash_matches = []
                 areas = []
+                hash_diffs = []
                 det_rects = []
                 #find the matching boxes
-                for rect in rects:
+                for i, rect in enumerate(rects):
                     x, y, w, h = rect
                     if(self.__match(sig.sig,img[y:y+h,x:x+w])): 
                         matches.append(img[y:y+h,x:x+w])
@@ -253,16 +249,42 @@ class extractor:
                     areas = np.sort(areas)
                     matches = [matches[i] for i in np.nonzero(areas > MIN_COMMON_AREA)[0]]
                     areas  = areas[np.nonzero(areas > MIN_COMMON_AREA)]
+                    
+                    hash_diffs = []
+                    hash_matches = matches.copy()
+                    
+                    for i, rect in enumerate(hash_matches):
+                        test_hash = imagehash.phash(Image.fromarray(rect))
+                        hash_diffs.append(test_hash - self.sig_hashes[k])
+                    hash_matches = [hash_matches[i] for i in np.argsort(hash_diffs)[::-1]]
+                    
                 else:
                     areas = np.array([MIN_COMMON_AREA])
+                    x, y, w, h = det_rects[0]
+                    test_hash = imagehash.phash(Image.fromarray(img[y:y+h,x:x+w]))
+                    hash_diffs = [test_hash - self.sig_hashes[k]]
+                    
                 sig_matches[k] = sig_matches[k] + matches#[-NUM_TOP_MATCHES:]
                 sig_areas[k] = sig_areas[k] + areas.tolist()#[-NUM_TOP_MATCHES:].tolist()
+                sig_hash_matches[k] = sig_hash_matches[k] + hash_matches
+                sig_diffs[k] = sig_diffs[k] + hash_diffs
         
         for k, sig in enumerate(self.signatures):
-            sig_matches[k] = [sig_matches[k][i] for i in np.argsort(sig_areas[k])]
+            #sig_matches[k] = [sig_matches[k][i] for i in np.argsort(sig_areas[k])]
+            #sig_hash_matches[k] = [sig_hash_matches[k][i] for i in np.argsort(sig_diffs[k])[::-1]]
+            sig_indices = np.argsort(sig_areas[k])
+            sig_hash_indices = np.argsort(sig_diffs[k])
+            p = 0.7
+            agg_matches = []
+            for i, indices in enumerate(sig_indices):
+                agg_matches.append(p*np.where(sig_hash_indices==indices)[0][0] + (1-p)*i)
+            new_matches = sig_matches[k].copy()
+            new_matches = [new_matches[i] for i in np.argsort(agg_matches)]
+#                    if((self.sig_hashes[k] - \
+#                    imagehash.phash(Image.fromarray(sig_matches[k][i]))) < 30)]
             #this would be something like 
             #[[sig1, [match1, match2, ...]],[sig2, [match1, ...]], ...]
-            self.payload.append([sig,sig_matches[k]])#[-NUM_TOP_MATCHES:]])
+            self.payload.append([sig,new_matches])#[-NUM_TOP_MATCHES:]])
         return self.payload
     
 class signature:
