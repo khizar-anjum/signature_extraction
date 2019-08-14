@@ -22,7 +22,9 @@ class extractor:
     batch_size (int)
         the batch size for forward pass in Siamese CNN. Adjust it according to your system's memory
     images (list)
-        The pages of pdf file converted to images
+        The pages of pdf file converted to images but processed to remove text from them. This makes it easier to detect signatures
+    text_images (list)
+        The pages of pdf file converted to images. More importantly, they have text in them.
     payload (list)
         A list of lists mentioning every signature and its closest matches
     sig_hashes (list)
@@ -48,6 +50,7 @@ class extractor:
         self.batch_size = batch_size
         # list of the images a pdf file is converted to after preperation
         self.images = []
+        self.text_images = []
         self.signatures = []
         self.payload = []
         self.sig_hashes = []
@@ -198,6 +201,7 @@ class extractor:
         if(self.__exists(filename)):
             self.current_file = filename
             self.images = convert_from_path(filename, 200)
+            self.text_images = self.images.copy()
             self.__preprocess()
     
     def clear(self):
@@ -223,7 +227,7 @@ class extractor:
                              Kindly prepare the file first')
         else:
             s = ''
-            for image in self.images:
+            for image in self.text_images:
                 s = s + image_to_string(image) + '\n'
             return s
         

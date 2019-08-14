@@ -9,8 +9,9 @@ To get started, install all the dependencies via Python pip manager.
 `pip install -r requirements.txt`  
 This will take care of the packages required for proper working of the `extractor` class except the installation of PyTorch. To get PyTorch installed, I suggest you go to [PyTorch](https://pytorch.org) homepage and get it installed according to your system's specifications.  
   
-If you have GPU capability on your system, do not forget to avail it by properly editing `extractor.__load_model()` method in `extractor.py` file i.e. by setting `device = torch.device('gpu')`.  
+You also have to install [PyTesseract-OCR Engine](https://github.com/tesseract-ocr/tesseract). Follow the instructions on their repo based on your system requirements and you should be fine. Pip only installs a wrapper to pytesseract binary and it does not work without the binary installed on your system.  
   
+If you have GPU capability on your system, do not forget to avail it by properly editing `extractor.__load_model()` method in `extractor.py` file i.e. by setting `device = torch.device('gpu')`.  
 # Usage
 First download the pre-trained Siamese Convolutional Neural Network by running `python DownloadModel.py`.  
 The pretrained weights and code for Siamese CNN's have been taken from [OfflineSignatureVerification](https://github.com/Aftaab99/OfflineSignatureVerification) repo.  
