@@ -14,13 +14,14 @@ from PIL import Image
 import cv2
 import torch
 from Model import SiameseConvNet, distance_metric
-from Preprocessing import convert_to_image_tensor, invert_image
-import matplotlib.pyplot as plt
+from Preprocessing import list_to_tensor
 
 class extractor:
     def __init__(self):
         # name of the current file under operation
         self.current_file = ''
+        #batch size to be used. tinker it according to your needs
+        self.batch_size = 8
         # list of the images a pdf file is converted to after preperation
         self.images = []
         self.signatures = []
@@ -40,17 +41,19 @@ class extractor:
         else:
             raise NameError('\''+filename+'\' does not exist in path.')
         
-    def __match(self,img1,img2):        
+    def __match(self,sig,img_list):
         MAX_DIST = 0.20
-        
-        X = convert_to_image_tensor(invert_image(Image.fromarray(img2))).view(1, 1, 220, 155)
-        A = convert_to_image_tensor(invert_image(Image.fromarray(img1))).view(1, 1, 220, 155)
-        f_A, f_X = self.model.forward(A, X)
-        dist = distance_metric(f_A, f_X).detach().numpy()
-        print(dist)
-        if dist <= MAX_DIST:
-            return True
-        else: return False
+        A = list_to_tensor([sig]*self.batch_size)
+        match_list = []
+        # a batch loop
+        for i, x in enumerate(range(int(len(img_list)/self.batch_size)+1)):
+            X = list_to_tensor(img_list[i*self.batch_size:(i+1)*self.batch_size])
+            S = A[:X.shape[0]]
+            
+            f_A, f_X = self.model.forward(S, X)
+            dist = distance_metric(f_A, f_X).detach().numpy()
+            match_list.append(dist <= MAX_DIST)
+        return match_list
             
     def __preprocess(self):
         for i,image in enumerate(self.images):
@@ -95,6 +98,9 @@ class extractor:
         #parameters
         MAX_OVERLAP = 0.80
         NEW_HEIGHT = 200
+        GOOD_SIG = True
+        _, img_org = cv2.threshold(img,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+        img = np.stack([img]*3,axis=2)
         # resize image
         frac = img.shape[0]/NEW_HEIGHT #the resize factor
         newWidth = int(img.shape[1]/frac)
@@ -109,20 +115,24 @@ class extractor:
          
         # run selective search segmentation on input image
         rects = ss.process()
-        print(len(rects))
+        
         #filter upon the basis of maximum overlap allowed
         areas = []            
+        area_imgs = []
         for i, rect in enumerate(rects[:-1,...]):
+            GOOD_SIG = True
+            x, y, w, h = rect
             for j in rects[i+1:,...]:
                 temp = self.__get_IOU(rect,j)
-                _, _, w, h = rect
                 if(temp > MAX_OVERLAP or h/w > 3): 
-                    areas.append(i)
+                    GOOD_SIG = False
                     break
-        rects = np.delete(rects,obj=areas,axis=0)
-        rects = rects*frac #resizing the reigons again
-        rects = rects.astype('int32')
-        return rects
+            if GOOD_SIG:
+                areas.append(rect)
+                areas[-1] = (areas[-1]*frac).astype('int32')
+                x, y, w, h = areas[-1]
+                area_imgs.append(img_org[y:y+h,x:x+w])
+        return areas, area_imgs
     
     def __process_line(self,thresh,output):	
         # assign a rectangle kernel size	1 vertical and the other will be horizontal
@@ -140,7 +150,7 @@ class extractor:
             x, y, w, h = cv2.boundingRect(cnt)
             aspects.append(w/h)
             areas.append(w*h)
-            if(w/h > 8 or (10000 < w*h and w*h < 20000) or w*h >200000):
+            if(w/h > 8 or (10000 < w*h and w*h < 20000)):
                 output[y:y+h,x:x+w][:] = 255
     		
         return output
@@ -148,8 +158,8 @@ class extractor:
     def __get_connected_components(self,img):
         img_bw = img.copy()
         img_bw = cv2.cvtColor(img_bw, cv2.COLOR_BGR2GRAY)
-        _,img_bw = cv2.threshold(img_bw,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-        return self.__process_line(img_bw, img)
+        _,img_wb = cv2.threshold(img_bw,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+        return self.__process_line(img_wb, img_bw)
         
     def prepare(self,filename):
         #prepares the file (pdf preferably) for extraction i.e. forms vars
@@ -175,89 +185,45 @@ class extractor:
             return s
         
     def load_signature(self, image_path, info):
+        #convert a signature to grayscale and then threshold it
         if(self.__exists(image_path)):
-            image = cv2.imread(image_path)
+            image = cv2.imread(image_path,0)
+            _,image = cv2.threshold(image,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
             self.signatures.append(signature(image,info))
             self.sig_hashes.append(imagehash.phash(Image.fromarray(image)))
         
     def extract(self):
         #get all the signatures in the document into one stuff
         #warning if signatures or the images are empty
-        MIN_COMMON_AREA = 0
         NUM_TOP_MATCHES = 4
+        
         self.payload = []
         sig_matches = [ [] for i in range(len(self.signatures)) ]
-        sig_hash_matches = sig_matches.copy()
-        sig_areas = sig_matches.copy()
-        sig_diffs = sig_matches.copy()
+        all_rects = []
+        all_rect_imgs = []
         for img in self.images:
             #get the rects with high probability of having signatures
-            rects = self.__get_selective_matches(img)
-            for k, sig in enumerate(self.signatures):
-                matches = []
-                hash_matches = []
-                areas = []
-                hash_diffs = []
-                det_rects = []
-                #find the matching boxes
-                print(len(rects))
-                for i, rect in enumerate(rects):
-                    x, y, w, h = rect
-                    plt.imsave('output'+str(i) + '.png',img[y:y+h,x:x+w])
-                    if(self.__match(sig.sig,img[y:y+h,x:x+w])): 
-                        matches.append(img[y:y+h,x:x+w])
-                        det_rects.append(rect)
-                #find the overlapping areas for each box with another
-                #this box weeds out false positives
-                if(det_rects == []):
-                    areas = np.array(areas)
-                elif(len(det_rects) > 1):
-                    for i, rect in enumerate(det_rects[:-1]):
-                        temp = []
-                        for j in det_rects[i+1:]:
-                            temp.append(self.__get_IOU(rect,j))
-                        areas.append(np.sum(np.array(temp)))
-                    #finding the positive boxes with greatest overlap    
-                    matches = [matches[i] for i in np.argsort(areas)]
-                    areas = np.sort(areas)
-                    matches = [matches[i] for i in np.nonzero(areas > MIN_COMMON_AREA)[0]]
-                    areas  = areas[np.nonzero(areas > MIN_COMMON_AREA)]
-                    
-                    hash_diffs = []
-                    hash_matches = matches.copy()
-                    
-                    for i, rect in enumerate(hash_matches):
-                        test_hash = imagehash.phash(Image.fromarray(rect))
-                        hash_diffs.append(test_hash - self.sig_hashes[k])
-                    hash_matches = [hash_matches[i] for i in np.argsort(hash_diffs)[::-1]]
-                    
-                else:
-                    areas = np.array([MIN_COMMON_AREA])
-                    x, y, w, h = det_rects[0]
-                    test_hash = imagehash.phash(Image.fromarray(img[y:y+h,x:x+w]))
-                    hash_diffs = [test_hash - self.sig_hashes[k]]
-                    
-                sig_matches[k] = sig_matches[k] + matches#[-NUM_TOP_MATCHES:]
-                sig_areas[k] = sig_areas[k] + areas.tolist()#[-NUM_TOP_MATCHES:].tolist()
-                sig_hash_matches[k] = sig_hash_matches[k] + hash_matches
-                sig_diffs[k] = sig_diffs[k] + hash_diffs
+            rects, rect_imgs = self.__get_selective_matches(img)
+            #skipping the first rect bbecause it is almost always the whole image
+            all_rects = all_rects + rects[1:]
+            all_rect_imgs = all_rect_imgs + rect_imgs[1:]
+
+        #get some random signatures and match against them
+        all_matches = np.zeros((len(all_rect_imgs),))
+        ran_sig = np.random.choice(len(self.signatures), size=2, replace=False)
+        for r in ran_sig:
+            matches = self.__match(self.signatures[r].sig, all_rect_imgs)
+            all_matches = np.logical_or(all_matches, np.hstack(matches))
         
+        matched_sigs = [all_rect_imgs[i] for i,val in enumerate(all_matches) if val]
+            
         for k, sig in enumerate(self.signatures):
-            #sig_matches[k] = [sig_matches[k][i] for i in np.argsort(sig_areas[k])]
-            #sig_hash_matches[k] = [sig_hash_matches[k][i] for i in np.argsort(sig_diffs[k])[::-1]]
-            sig_indices = np.argsort(sig_areas[k])
-            sig_hash_indices = np.argsort(sig_diffs[k])
-            p = 0.7
-            agg_matches = []
-            for i, indices in enumerate(sig_indices):
-                agg_matches.append(p*np.where(sig_hash_indices==indices)[0][0] + (1-p)*i)
-            new_matches = sig_matches[k].copy()
-            new_matches = [new_matches[i] for i in np.argsort(agg_matches)]
-#                    if((self.sig_hashes[k] - \
-#                    imagehash.phash(Image.fromarray(sig_matches[k][i]))) < 30)]
-            #this would be something like 
-            #[[sig1, [match1, match2, ...]],[sig2, [match1, ...]], ...]
-            self.payload.append([sig,new_matches])#[-NUM_TOP_MATCHES:]])
+            hash_diffs = []
+            for sig_img in matched_sigs:
+                test_hash = imagehash.phash(Image.fromarray(sig_img))
+                hash_diffs.append(test_hash - self.sig_hashes[k])
+            sig_matches[k] = [matched_sigs[i] for i in np.argsort(hash_diffs)][:NUM_TOP_MATCHES]
+            self.payload.append([sig,sig_matches[k]])
         return self.payload
     
 class signature:
