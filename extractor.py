@@ -74,12 +74,14 @@ class extractor:
         match_list = []
         # a batch loop
         for i, x in enumerate(range(int(len(img_list)/self.batch_size)+1)):
-            X = list_to_tensor(img_list[i*self.batch_size:(i+1)*self.batch_size])
-            S = A[:X.shape[0]]
-            
-            f_A, f_X = self.model.forward(S, X)
-            dist = distance_metric(f_A, f_X).detach().numpy()
-            match_list.append(dist <= MAX_DIST)
+            curr_batch = img_list[i*self.batch_size:(i+1)*self.batch_size]
+            if len(curr_batch) != 0:
+                X = list_to_tensor(curr_batch)
+                S = A[:X.shape[0]]
+                
+                f_A, f_X = self.model.forward(S, X)
+                dist = distance_metric(f_A, f_X).detach().numpy()
+                match_list.append(dist <= MAX_DIST)
         return match_list
             
     def __preprocess(self):
